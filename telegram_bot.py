@@ -1,255 +1,284 @@
-import json
 import math
 import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# Token
+TOKEN   = os.environ.get("TOKEN") or "8665005659:AAEzQJ6Wlpxf0cHScoFDwHfjgnXTjIkrPxE"
+ADMIN_ID = 6424297442
 
-TOKEN = os.environ.get("TOKEN") or "8665005659:AAEzQJ6Wlpxf0cHScoFDwHfjgnXTjIkrPxE"
-
-# Senin Telegram ID'n
-ADMIN_ID = 6424297442  # Örn: 123456789
-
-# Onaylanan kullanıcılar (başlangıçta sadece admin)
 onaylı_kullanicilar = set([ADMIN_ID])
+bekleyen_istekler   = {}
 
-# Bekleyen istekler
-bekleyen_istekler = {}
-
-# Takım verilerini yükle
 with open("takim_verileri.json", "r", encoding="utf-8") as f:
     takimVerileri = json.load(f)
 
-# Poisson hesabı
+# ─── Yardımcı fonksiyonlar ───────────────────────────────────────────
+
 def poisson(beklenen, hedef):
     return math.exp(-beklenen) * beklenen**hedef / math.factorial(hedef)
 
-# Takım arama
 def takim_bul(aranan):
     aranan = aranan.lower().strip()
-    
     for takim in takimVerileri:
         if takim.lower() == aranan:
             return [takim]
-    
-    sonuclar = []
-    for takim in takimVerileri:
-        if aranan in takim.lower():
-            sonuclar.append(takim)
-    
-    return sonuclar
+    return [t for t in takimVerileri if aranan in t.lower()]
 
-# Maç tahmini
+def dinamik_katsayi(takim, mod="ev"):
+    veri = takimVerileri.get(takim, {})
+
+    if mod == "ev":
+        sonuclar = veri.get("ic_son10_sonuclar", [])
+        if not sonuclar:
+            return 1.0
+        son5  = sonuclar[-5:]
+        son10 = sonuclar
+        oran5  = son5.count("G")  / len(son5)
+        oran10 = son10.count("G") / len(son10)
+        agirlikli = (oran5 * 0.6) + (oran10 * 0.4)
+        return round(0.85 + (agirlikli * 0.45), 3)
+
+    elif mod == "dep":
+        sonuclar = veri.get("dis_son10_sonuclar", [])
+        if not sonuclar:
+            return 1.0
+        son5  = sonuclar[-5:]
+        son10 = sonuclar
+        yenilgi5  = son5.count("M")  / len(son5)
+        yenilgi10 = son10.count("M") / len(son10)
+        agirlikli = (yenilgi5 * 0.6) + (yenilgi10 * 0.4)
+        return round(1.00 - (agirlikli * 0.28), 3)
+
+    return 1.0
+
+def mac_sonucu_tahmini(ev_lambda, dep_lambda, max_gol=6):
+    ev_kazan = beraberlik = dep_kazan = 0.0
+    for ev in range(max_gol + 1):
+        for dep in range(max_gol + 1):
+            p = poisson(ev_lambda, ev) * poisson(dep_lambda, dep)
+            if   ev > dep: ev_kazan   += p
+            elif ev == dep: beraberlik += p
+            else:           dep_kazan  += p
+    return ev_kazan, beraberlik, dep_kazan
+
+def form_str(sonuclar):
+    """Son 5 sonucu emoji olarak göster: G=✅ B=🟡 M=❌"""
+    if not sonuclar:
+        return "Veri yok"
+    emojiler = {"G": "✅", "B": "🟡", "M": "❌"}
+    return " ".join(emojiler.get(s, "?") for s in sonuclar[-5:])
+
+def yorum_uret(ev, dep, evS, depS, ev_katsayi, dep_katsayi,
+               ev_kazan, beraberlik, dep_kazan, toplam_beklenen):
+    satirlar = []
+
+    # İç saha formu
+    ic_son5  = evS.get("ic_son10_sonuclar", [])[-5:]
+    ic_son10 = evS.get("ic_son10_sonuclar", [])
+    ic_gal5  = ic_son5.count("G")
+    ic_gal10 = ic_son10.count("G")
+
+    if ic_gal5 >= 4:
+        satirlar.append(f"🔥 {ev} iç sahada son 5 maçın {ic_gal5}'ini kazandı, form zirvede.")
+    elif ic_gal5 <= 1:
+        satirlar.append(f"⚠️ {ev} iç sahada son 5 maçın yalnızca {ic_gal5}'ini kazandı, ev avantajı zayıf.")
+    else:
+        satirlar.append(f"📊 {ev} iç sahada son 5 maçın {ic_gal5}'ini, son 10 maçın {ic_gal10}'ini kazandı.")
+
+    # Deplasman formu
+    dis_son5  = depS.get("dis_son10_sonuclar", [])[-5:]
+    dis_son10 = depS.get("dis_son10_sonuclar", [])
+    dis_gal5  = dis_son5.count("G")
+    dis_gal10 = dis_son10.count("G")
+
+    if dis_gal5 >= 4:
+        satirlar.append(f"✈️ {dep} deplasmanda son 5 maçın {dis_gal5}'ini kazandı, güçlü deplasman takımı.")
+    elif dis_gal5 <= 1:
+        satirlar.append(f"📉 {dep} deplasmanda son 5 maçın yalnızca {dis_gal5}'ini kazandı, dezavantaj belirgin.")
+    else:
+        satirlar.append(f"📊 {dep} deplasmanda son 5 maçın {dis_gal5}'ini, son 10 maçın {dis_gal10}'ini kazandı.")
+
+    # Gol eğilimi
+    if toplam_beklenen > 3.0:
+        satirlar.append(f"⚽ Beklenen toplam gol yüksek ({toplam_beklenen:.1f}), gollü maç ihtimali güçlü.")
+    elif toplam_beklenen < 2.0:
+        satirlar.append(f"🔒 Beklenen toplam gol düşük ({toplam_beklenen:.1f}), düşük skorlu maç bekleniyor.")
+
+    # Favorisi
+    if ev_kazan > 0.50:
+        satirlar.append(f"🏆 Ev sahibi favorisi net görünüyor (%{ev_kazan*100:.0f}).")
+    elif dep_kazan > 0.40:
+        satirlar.append(f"🏆 Deplasman takımı sürpriz yapabilir (%{dep_kazan*100:.0f}).")
+    elif beraberlik > 0.28:
+        satirlar.append(f"🤝 Beraberlik göz ardı edilmemeli (%{beraberlik*100:.0f}).")
+
+    return "\n".join(satirlar)
+
+# ─── Ana tahmin fonksiyonu ────────────────────────────────────────────
+
 def mac_tahmini(ev, dep):
-    evS = takimVerileri[ev]
+    evS  = takimVerileri[ev]
     depS = takimVerileri[dep]
 
-    evBeklenen = (evS["ic_gol_atma_ort"] + depS["dis_gol_yeme_ort"]) / 2
-    depBeklenen = (depS["dis_gol_atma_ort"] + evS["ic_gol_yeme_ort"]) / 2
-    toplam = evBeklenen + depBeklenen
+    ev_lig_ort  = evS.get("lig_ev_ort",  1.4)
+    dep_lig_ort = depS.get("lig_dep_ort", 1.2)
 
-    evIY = (evS["ic_iy_gol_atma_ort"] + depS["dis_iy_gol_yeme_ort"]) / 2
-    depIY = (depS["dis_iy_gol_atma_ort"] + evS["ic_iy_gol_yeme_ort"]) / 2
-    toplamIY = evIY + depIY
+    ev_att  = evS["ic_gol_atma_ort"]  / ev_lig_ort  if ev_lig_ort  > 0 else 1
+    ev_def  = evS["ic_gol_yeme_ort"]  / dep_lig_ort if dep_lig_ort > 0 else 1
+    dep_att = depS["dis_gol_atma_ort"] / dep_lig_ort if dep_lig_ort > 0 else 1
+    dep_def = depS["dis_gol_yeme_ort"] / ev_lig_ort  if ev_lig_ort  > 0 else 1
 
-    alt25 = sum([poisson(toplam, i) for i in range(3)])
-    ust25 = 1 - alt25
+    ev_katsayi  = dinamik_katsayi(ev,  mod="ev")
+    dep_katsayi = dinamik_katsayi(dep, mod="dep")
 
-    alt15 = sum([poisson(toplam, i) for i in range(2)])
-    ust15 = 1 - alt15
+    evBeklenen  = ev_att  * dep_def * ev_lig_ort  * ev_katsayi
+    depBeklenen = dep_att * ev_def  * dep_lig_ort * dep_katsayi
+    toplam      = evBeklenen + depBeklenen
 
-    iyAlt05 = poisson(toplamIY, 0)
-    iyUst05 = 1 - iyAlt05
+    ev_iy  = (evS["ic_iy_gol_atma_ort"]  + depS["dis_iy_gol_yeme_ort"]) / 2
+    dep_iy = (depS["dis_iy_gol_atma_ort"] + evS["ic_iy_gol_yeme_ort"])  / 2
+    toplam_iy = ev_iy + dep_iy
 
-    iyAlt15 = sum([poisson(toplamIY, i) for i in range(2)])
-    iyUst15 = 1 - iyAlt15
+    alt25   = sum(poisson(toplam, i)    for i in range(3))
+    ust25   = 1 - alt25
+    alt15   = sum(poisson(toplam, i)    for i in range(2))
+    ust15   = 1 - alt15
+    iy_alt05 = poisson(toplam_iy, 0)
+    iy_ust05 = 1 - iy_alt05
+    iy_alt15 = sum(poisson(toplam_iy, i) for i in range(2))
+    iy_ust15 = 1 - iy_alt15
+
+    ev_kazan, beraberlik, dep_kazan = mac_sonucu_tahmini(evBeklenen, depBeklenen)
+
+    yorum = yorum_uret(ev, dep, evS, depS, ev_katsayi, dep_katsayi,
+                       ev_kazan, beraberlik, dep_kazan, toplam)
 
     mesaj = f"""
 ⚽ *{ev} vs {dep}*
 {'='*35}
 
-🏠 *{ev} (İç Saha)*
-▪️ Maç Sayısı: {evS['ic_mac_sayisi']}
-▪️ Gol Atma Ort: {evS['ic_gol_atma_ort']}
-▪️ Gol Yeme Ort: {evS['ic_gol_yeme_ort']}
-▪️ İY Gol Atma: {evS['ic_iy_gol_atma_ort']}
-▪️ İY Gol Yeme: {evS['ic_iy_gol_yeme_ort']}
+🏠 *{ev} — İç Saha Formu*
+{form_str(evS.get('ic_son10_sonuclar', []))}
+▪️ Maç: {evS['ic_mac_sayisi']} | Gol Atma: {evS['ic_gol_atma_ort']} | Yeme: {evS['ic_gol_yeme_ort']}
+▪️ Ev Katsayısı: x{ev_katsayi}
 
-✈️ *{dep} (Deplasman)*
-▪️ Maç Sayısı: {depS['dis_mac_sayisi']}
-▪️ Gol Atma Ort: {depS['dis_gol_atma_ort']}
-▪️ Gol Yeme Ort: {depS['dis_gol_yeme_ort']}
-▪️ İY Gol Atma: {depS['dis_iy_gol_atma_ort']}
-▪️ İY Gol Yeme: {depS['dis_iy_gol_yeme_ort']}
+✈️ *{dep} — Deplasman Formu*
+{form_str(depS.get('dis_son10_sonuclar', []))}
+▪️ Maç: {depS['dis_mac_sayisi']} | Gol Atma: {depS['dis_gol_atma_ort']} | Yeme: {depS['dis_gol_yeme_ort']}
+▪️ Deplasman Katsayısı: x{dep_katsayi}
 
 🎯 *Beklenen Goller*
-▪️ {ev}: {evBeklenen:.2f}
-▪️ {dep}: {depBeklenen:.2f}
-▪️ Toplam: {toplam:.2f}
+▪️ {ev}: {evBeklenen:.2f} | {dep}: {depBeklenen:.2f} | Toplam: {toplam:.2f}
 
-📈 *Maç Sonu Tahminleri*
+🏆 *Maç Sonucu (1X2)*
+1️⃣ {ev} Kazanır: %{ev_kazan*100:.1f}
+➖ Beraberlik: %{beraberlik*100:.1f}
+2️⃣ {dep} Kazanır: %{dep_kazan*100:.1f}
+
+📈 *Maç Sonu — Üst/Alt*
 ⚽ 2.5 ÜST: %{ust25*100:.1f} | ALT: %{alt25*100:.1f}
 ⚽ 1.5 ÜST: %{ust15*100:.1f} | ALT: %{alt15*100:.1f}
 
-🕐 *İlk Yarı Tahminleri*
-⚽ IY 0.5 ÜST: %{iyUst05*100:.1f} | ALT: %{iyAlt05*100:.1f}
-⚽ IY 1.5 ÜST: %{iyUst15*100:.1f} | ALT: %{iyAlt15*100:.1f}
+🕐 *İlk Yarı — Üst/Alt*
+⚽ İY 0.5 ÜST: %{iy_ust05*100:.1f} | ALT: %{iy_alt05*100:.1f}
+⚽ İY 1.5 ÜST: %{iy_ust15*100:.1f} | ALT: %{iy_alt15*100:.1f}
+
+💬 *Yorum*
+{yorum}
 """
     return mesaj
 
-# /start komutu
+# ─── Telegram handler'ları ────────────────────────────────────────────
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kullanici_id = update.message.from_user.id
     kullanici_ad = update.message.from_user.full_name
 
-    # Admin ise direkt geç
     if kullanici_id == ADMIN_ID:
-        await update.message.reply_text("""
-👋 Hoş geldin Admin!
-
-📌 *Kullanım:*
-`Liverpool - Arsenal`
-
-✅ Takım adını tam yazmana gerek yok!
-✅ Büyük küçük harf fark etmez!
-""", parse_mode="Markdown")
+        await update.message.reply_text(
+            "👋 Hoş geldin Admin!\n\n📌 *Kullanım:*\n`Liverpool - Arsenal`",
+            parse_mode="Markdown")
         return
 
-    # Onaylı kullanıcı ise geç
     if kullanici_id in onaylı_kullanicilar:
-        await update.message.reply_text("""
-👋 Merhaba! Ben Futbol Analiz Botuyum!
-
-📌 *Kullanım:*
-`Liverpool - Arsenal`
-
-✅ Takım adını tam yazmana gerek yok!
-✅ Büyük küçük harf fark etmez!
-""", parse_mode="Markdown")
+        await update.message.reply_text(
+            "👋 Merhaba!\n\n📌 *Kullanım:*\n`Liverpool - Arsenal`",
+            parse_mode="Markdown")
         return
 
-    # Zaten bekleyen istek var mı
     if kullanici_id in bekleyen_istekler:
-        await update.message.reply_text("⏳ Erişim isteğin zaten gönderildi. Onay bekleniyor...")
+        await update.message.reply_text("⏳ İsteğin zaten gönderildi, onay bekleniyor...")
         return
 
-    # Yeni istek
     bekleyen_istekler[kullanici_id] = kullanici_ad
-
-    # Admin'e bildirim gönder
-    klavye = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Onayla", callback_data=f"onayla_{kullanici_id}"),
-            InlineKeyboardButton("❌ Reddet", callback_data=f"reddet_{kullanici_id}")
-        ]
-    ])
-
+    klavye = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Onayla", callback_data=f"onayla_{kullanici_id}"),
+        InlineKeyboardButton("❌ Reddet", callback_data=f"reddet_{kullanici_id}")
+    ]])
     await context.bot.send_message(
         chat_id=ADMIN_ID,
-        text=f"🔔 *Yeni Erişim İsteği!*\n\n👤 İsim: {kullanici_ad}\n🆔 ID: {kullanici_id}\n\nOnaylıyor musun?",
-        reply_markup=klavye,
-        parse_mode="Markdown"
-    )
+        text=f"🔔 *Yeni Erişim İsteği!*\n\n👤 {kullanici_ad}\n🆔 {kullanici_id}",
+        reply_markup=klavye, parse_mode="Markdown")
+    await update.message.reply_text("⏳ İsteğin gönderildi, onay bekleniyor...")
 
-    await update.message.reply_text("⏳ Erişim isteğin gönderildi. Onay bekleniyor...")
-
-# Onay/Red butonu
 async def buton(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    data = query.data
+    data  = query.data
 
     if data.startswith("onayla_"):
-        kullanici_id = int(data.split("_")[1])
-        onaylı_kullanicilar.add(kullanici_id)
-        
-        if kullanici_id in bekleyen_istekler:
-            del bekleyen_istekler[kullanici_id]
-
-        await query.edit_message_text(f"✅ Kullanıcı {kullanici_id} onaylandı!")
-
+        uid = int(data.split("_")[1])
+        onaylı_kullanicilar.add(uid)
+        bekleyen_istekler.pop(uid, None)
+        await query.edit_message_text(f"✅ {uid} onaylandı!")
         await context.bot.send_message(
-            chat_id=kullanici_id,
-            text="✅ Erişim isteğin onaylandı! Artık botu kullanabilirsin!\n\n`Liverpool - Arsenal` formatında maç analizi yapabilirsin.",
-            parse_mode="Markdown"
-        )
+            chat_id=uid,
+            text="✅ Erişimin onaylandı! `Liverpool - Arsenal` formatında yazabilirsin.",
+            parse_mode="Markdown")
 
     elif data.startswith("reddet_"):
-        kullanici_id = int(data.split("_")[1])
-        
-        if kullanici_id in bekleyen_istekler:
-            del bekleyen_istekler[kullanici_id]
+        uid = int(data.split("_")[1])
+        bekleyen_istekler.pop(uid, None)
+        await query.edit_message_text(f"❌ {uid} reddedildi!")
+        await context.bot.send_message(chat_id=uid, text="❌ Erişim isteğin reddedildi.")
 
-        await query.edit_message_text(f"❌ Kullanıcı {kullanici_id} reddedildi!")
-
-        await context.bot.send_message(
-            chat_id=kullanici_id,
-            text="❌ Erişim isteğin reddedildi."
-        )
-
-# Mesaj gelince analiz yap
 async def analiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kullanici_id = update.message.from_user.id
-
     if kullanici_id not in onaylı_kullanicilar:
-        await update.message.reply_text("⛔ Bu botu kullanma yetkiniz yok!\n\n/start yazarak erişim isteği gönderebilirsin.")
+        await update.message.reply_text(
+            "⛔ Yetkin yok!\n\n/start yazarak erişim isteği gönderebilirsin.")
         return
 
     metin = update.message.text
-
     if " - " not in metin:
         await update.message.reply_text(
-            "⚠️ Lütfen şu formatta yaz:\n`Liverpool - Arsenal`",
-            parse_mode="Markdown"
-        )
+            "⚠️ Format: `Liverpool - Arsenal`", parse_mode="Markdown")
         return
 
-    takimlar = metin.split(" - ")
-    if len(takimlar) != 2:
+    parcalar = metin.split(" - ")
+    if len(parcalar) != 2:
         await update.message.reply_text("⚠️ Hatalı format! Örnek: `Liverpool - Arsenal`")
         return
 
-    ev_aranan = takimlar[0].strip()
-    dep_aranan = takimlar[1].strip()
+    ev_sonuclar  = takim_bul(parcalar[0].strip())
+    dep_sonuclar = takim_bul(parcalar[1].strip())
 
-    ev_sonuclar = takim_bul(ev_aranan)
-    dep_sonuclar = takim_bul(dep_aranan)
-
-    if len(ev_sonuclar) == 0:
-        await update.message.reply_text(f"❌ '{ev_aranan}' bulunamadı!\n\nFarklı bir isim dene.")
-        return
-
-    if len(ev_sonuclar) > 1:
-        liste = "\n".join([f"▪️ {t}" for t in ev_sonuclar])
-        await update.message.reply_text(
-            f"🔍 '{ev_aranan}' için birden fazla takım bulundu:\n\n{liste}\n\nDaha spesifik yaz!",
-            parse_mode="Markdown"
-        )
-        return
-
-    if len(dep_sonuclar) == 0:
-        await update.message.reply_text(f"❌ '{dep_aranan}' bulunamadı!\n\nFarklı bir isim dene.")
-        return
-
-    if len(dep_sonuclar) > 1:
-        liste = "\n".join([f"▪️ {t}" for t in dep_sonuclar])
-        await update.message.reply_text(
-            f"🔍 '{dep_aranan}' için birden fazla takım bulundu:\n\n{liste}\n\nDaha spesifik yaz!",
-            parse_mode="Markdown"
-        )
-        return
-
-    ev = ev_sonuclar[0]
-    dep = dep_sonuclar[0]
+    for sonuclar, taraf in [(ev_sonuclar, parcalar[0]), (dep_sonuclar, parcalar[1])]:
+        if len(sonuclar) == 0:
+            await update.message.reply_text(f"❌ '{taraf}' bulunamadı!")
+            return
+        if len(sonuclar) > 1:
+            liste = "\n".join(f"▪️ {t}" for t in sonuclar)
+            await update.message.reply_text(
+                f"🔍 Birden fazla sonuç:\n\n{liste}\n\nDaha spesifik yaz!")
+            return
 
     await update.message.reply_text("🔍 Analiz yapılıyor...")
-
-    sonuc = mac_tahmini(ev, dep)
+    sonuc = mac_tahmini(ev_sonuclar[0], dep_sonuclar[0])
     await update.message.reply_text(sonuc, parse_mode="Markdown")
 
-# Botu çalıştır
+# ─── Botu başlat ─────────────────────────────────────────────────────
+
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CallbackQueryHandler(buton))
