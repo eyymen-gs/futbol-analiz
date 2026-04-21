@@ -242,7 +242,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kullanici_ad = update.message.from_user.full_name
     if kullanici_id == ADMIN_ID:
         await update.message.reply_text(
-            "👋 Hoş geldin Admin!\n\n📌 *Kullanım:*\n`Liverpool - Arsenal`",
+            "👋 Hoş geldin Admin!\n\n"
+            "📌 *Kullanım:*\n"
+            "`Liverpool - Arsenal` — Maç analizi\n\n"
+            "🔍 *Tarama komutları:*\n"
+            "`/tarama evet/evet 7`\n"
+            "`/tarama hayir/hayir 60`\n"
+            "`/tarama 1/2 5`\n"
+            "`/tarama ust25 65`\n"
+            "`/tarama alt25 55`\n",
             parse_mode="Markdown")
         return
     if kullanici_id in onaylı_kullanicilar:
@@ -371,7 +379,12 @@ async def tarama(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "1/1": iyms["1/1"]*100, "1/x": iyms["1/X"]*100, "1/2": iyms["1/2"]*100,
                 "x/1": iyms["X/1"]*100, "x/x": iyms["X/X"]*100, "x/2": iyms["X/2"]*100,
                 "2/1": iyms["2/1"]*100, "2/x": iyms["2/X"]*100, "2/2": iyms["2/2"]*100,
+                "ust25": (1 - sum(poisson(evBeklenen + depBeklenen, i) for i in range(3))) * 100,
+                "alt25": (sum(poisson(evBeklenen + depBeklenen, i) for i in range(3))) * 100,
+                "ust15": (1 - sum(poisson(evBeklenen + depBeklenen, i) for i in range(2))) * 100,
+                "alt15": (sum(poisson(evBeklenen + depBeklenen, i) for i in range(2))) * 100,
             }
+
             deger = kriter_map.get(kriter)
             if deger is not None and deger >= esik:
                 bulunanlar.append({
