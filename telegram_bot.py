@@ -133,6 +133,32 @@ def yorum_uret(ev, dep, evS, depS, ev_katsayi, dep_katsayi,
         satirlar.append(f"🤝 Beraberlik göz ardı edilmemeli (%{beraberlik*100:.0f}).")
     return "\n".join(satirlar)
 
+def yaklasan_maclari_cek():
+    import requests
+    from datetime import datetime, timedelta
+    API_KEY = "3fb43b538ea9469a973c2d565e4f3051"
+    headers = {"X-Auth-Token": API_KEY}
+    LIGLER  = ["PL", "BL1", "SA", "PD", "FL1", "DED", "PPL", "ELC"]
+    bugun   = datetime.now().strftime("%Y-%m-%d")
+    bitis   = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+    maclar  = []
+    for lig in LIGLER:
+        try:
+            url    = f"https://api.football-data.org/v4/competitions/{lig}/matches"
+            params = {"status": "SCHEDULED", "dateFrom": bugun, "dateTo": bitis}
+            r      = requests.get(url, headers=headers, params=params, timeout=10)
+            data   = r.json()
+            for mac in data.get("matches", []):
+                maclar.append({
+                    "ev":    mac["homeTeam"]["name"],
+                    "dep":   mac["awayTeam"]["name"],
+                    "tarih": mac["utcDate"][:10],
+                    "lig":   lig
+                })
+        except:
+            continue
+    return maclar
+
 def mac_tahmini(ev, dep):
     evS  = takimVerileri[ev]
     depS = takimVerileri[dep]
@@ -287,9 +313,91 @@ async def analiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sonuc = mac_tahmini(ev_sonuclar[0], dep_sonuclar[0])
     await update.message.reply_text(sonuc, parse_mode="Markdown")
 
+async def tarama(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kullanici_id = update.message.from_user.id
+    if kullanici_id not in onaylı_kullanicilar:
+        await update.message.reply_text("⛔ Yetkin yok.")
+        return
+    args = context.args
+    if len(args) < 1:
+        await update.message.reply_text(
+            "📌 *Kullanım:*\n"
+            "`/tarama evet/evet 7` — Evet/Evet %7 üstü\n"
+            "`/tarama 1/2 5` — 1/2 %5 üstü\n"
+            "`/tarama 2/1 5` — 2/1 %5 üstü\n\n"
+            "Kriterler: `evet/evet`, `evet/hayir`, `hayir/evet`, `hayir/hayir`,\n"
+            "`1/1`, `1/x`, `1/2`, `x/1`, `x/x`, `x/2`, `2/1`, `2/x`, `2/2`",
+            parse_mode="Markdown")
+        return
+    kriter = args[0].lower()
+    esik   = float(args[1]) if len(args) > 1 else 5.0
+    await update.message.reply_text(f"🔍 Maçlar taranıyor... ({kriter.upper()} > %{esik})")
+    maclar = yaklasan_maclari_cek()
+    if not maclar:
+        await update.message.reply_text("❌ Maç verisi çekilemedi.")
+        return
+    bulunanlar = []
+    for mac in maclar:
+        ev  = mac["ev"]
+        dep = mac["dep"]
+        ev_sonuc  = takim_bul(ev)
+        dep_sonuc = takim_bul(dep)
+        if len(ev_sonuc) != 1 or len(dep_sonuc) != 1:
+            continue
+        try:
+            evS  = takimVerileri[ev_sonuc[0]]
+            depS = takimVerileri[dep_sonuc[0]]
+            ev_lig_ort  = evS.get("lig_ev_ort",  1.4)
+            dep_lig_ort = depS.get("lig_dep_ort", 1.2)
+            ev_att  = evS["ic_gol_atma_ort"]  / ev_lig_ort  if ev_lig_ort  > 0 else 1
+            ev_def  = evS["ic_gol_yeme_ort"]  / dep_lig_ort if dep_lig_ort > 0 else 1
+            dep_att = depS["dis_gol_atma_ort"] / dep_lig_ort if dep_lig_ort > 0 else 1
+            dep_def = depS["dis_gol_yeme_ort"] / ev_lig_ort  if ev_lig_ort  > 0 else 1
+            ev_katsayi  = dinamik_katsayi(ev_sonuc[0],  mod="ev")
+            dep_katsayi = dinamik_katsayi(dep_sonuc[0], mod="dep")
+            evBeklenen  = ev_att  * dep_def * ev_lig_ort  * ev_katsayi
+            depBeklenen = dep_att * ev_def  * dep_lig_ort * dep_katsayi
+            ev_iy_lambda  = (evS["ic_iy_gol_atma_ort"]  + depS["dis_iy_gol_yeme_ort"]) / 2
+            dep_iy_lambda = (depS["dis_iy_gol_atma_ort"] + evS["ic_iy_gol_yeme_ort"])  / 2
+            ev_iy2_lambda  = (evS.get("ic_iy2_gol_atma_ort", 0)  + depS.get("dis_iy2_gol_yeme_ort", 0)) / 2
+            dep_iy2_lambda = (depS.get("dis_iy2_gol_atma_ort", 0) + evS.get("ic_iy2_gol_yeme_ort", 0))  / 2
+            iyms = iy_ms_tahmini(ev_iy_lambda, dep_iy_lambda, evBeklenen, depBeklenen)
+            kg   = kg_tahmini(ev_iy_lambda, dep_iy_lambda, ev_iy2_lambda, dep_iy2_lambda)
+            kriter_map = {
+                "evet/evet":   kg["Evet/Evet"]   * 100,
+                "evet/hayir":  kg["Evet/Hayır"]  * 100,
+                "hayir/evet":  kg["Hayır/Evet"]  * 100,
+                "hayir/hayir": kg["Hayır/Hayır"] * 100,
+                "1/1": iyms["1/1"]*100, "1/x": iyms["1/X"]*100, "1/2": iyms["1/2"]*100,
+                "x/1": iyms["X/1"]*100, "x/x": iyms["X/X"]*100, "x/2": iyms["X/2"]*100,
+                "2/1": iyms["2/1"]*100, "2/x": iyms["2/X"]*100, "2/2": iyms["2/2"]*100,
+            }
+            deger = kriter_map.get(kriter)
+            if deger is not None and deger >= esik:
+                bulunanlar.append({
+                    "ev":    ev_sonuc[0],
+                    "dep":   dep_sonuc[0],
+                    "tarih": mac["tarih"],
+                    "deger": deger
+                })
+        except:
+            continue
+    if not bulunanlar:
+        await update.message.reply_text(f"❌ {kriter.upper()} > %{esik} olan maç bulunamadı.")
+        return
+    bulunanlar.sort(key=lambda x: x["deger"], reverse=True)
+    mesaj = f"🎯 *{kriter.upper()} > %{esik} olan maçlar:*\n{'='*30}\n"
+    for b in bulunanlar:
+        mesaj += f"\n⚽ {b['ev']} vs {b['dep']}\n"
+        mesaj += f"   📅 {b['tarih']} | %{b['deger']:.1f}\n"
+    if len(mesaj) > 4096:
+        mesaj = mesaj[:4090] + "..."
+    await update.message.reply_text(mesaj, parse_mode="Markdown")
+
 app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("start",   start))
 app.add_handler(CallbackQueryHandler(buton))
+app.add_handler(CommandHandler("tarama",  tarama))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analiz))
 
 print("🤖 Bot çalışıyor...")
