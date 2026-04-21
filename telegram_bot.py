@@ -1,10 +1,3 @@
-Neredeyse! Ama iki şey eksik:
-
-En üstte import json yok
-mac_sonucu_tahmini fonksiyonundan sonra iy_ms_tahmini ve kg_tahmini fonksiyonları yok
-İşte tam ve doğru hali — bunu direkt kullan:
-
-python
 import json
 import math
 import os
