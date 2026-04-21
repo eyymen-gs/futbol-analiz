@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -134,8 +135,6 @@ def yorum_uret(ev, dep, evS, depS, ev_katsayi, dep_katsayi,
     return "\n".join(satirlar)
 
 def yaklasan_maclari_cek():
-    import requests
-    from datetime import datetime, timedelta
     API_KEY = "3fb43b538ea9469a973c2d565e4f3051"
     headers = {"X-Auth-Token": API_KEY}
     LIGLER  = ["PL", "BL1", "SA", "PD", "FL1", "DED", "PPL", "ELC"]
